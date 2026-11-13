@@ -1,0 +1,29 @@
+{
+  "snapshots": [
+    {
+      "file": "01-original-develop-baseline.svelte",
+      "gitBlob": "4ade234ecec33a4e5dfed03cd3e4119013b9674f",
+      "bytes": 7672,
+      "lines": 211
+    },
+    {
+      "file": "02-before-linked-chat-edits.svelte",
+      "gitBlob": "9cd0d28b32c20942913cbdd2c362c89ae9144d58",
+      "bytes": 18631,
+      "lines": 523
+    },
+    {
+      "file": "03-before-conflict-recovery-attempts.svelte",
+      "gitBlob": "64dc874d52b46be6904458d56f8b2ce170154d3b",
+      "bytes": 18699,
+      "lines": 524
+    }
+  ],
+  "evidence": [
+    "Linked chat recorded 9cd0d28 -> 64dc874 on November 11 at 22:12 Eastern.",
+    "Earlier recovery chat 01a1d1b4-8916-7c60-998a-3762f2e9bdfc at November 12 16:40 Eastern recorded stages: base=9cd0d28, ours=4ade234, theirs=64dc874.",
+    "That chat wrote 4ade234 at 16:41 Eastern, then 64dc874 at 16:48 Eastern.",
+    "64dc874 is the best-supported clean version predating these recovery attempts. No evidence establishes an additional newer clean version.",
+    "Current live file preserved byte-for-byte. Copies from Git retain their original blob bytes."
+  ]
+}
