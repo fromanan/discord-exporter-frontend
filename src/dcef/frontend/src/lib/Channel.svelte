@@ -35,6 +35,14 @@
     <ChannelStart channelName={message.channelName} isThread={false} messageAuthor={message.author} />
 {/snippet}
 
+{#snippet emptyChannelSnippet()}
+    <div class="empty-channel" role="status">
+        <h2>No archived messages yet</h2>
+        <p>This channel is listed in the archive, but no messages are available to display.</p>
+        <p>With capture enabled in the Discord tab, open this conversation and scroll to load messages, then refresh the viewer.</p>
+    </div>
+{/snippet}
+
 {#snippet channelEndSnippet(index, message, previousMessage)}
     <div data-messageid="last">
         this is the end of the channel
@@ -70,6 +78,7 @@
                         onViewportChange={replaceViewportState}
                         snippetMessage={renderMessageSnippet2}
                         channelStartSnippet={channelStartSnippet}
+                        emptySnippet={emptyChannelSnippet}
                     />
                 {/key}
             {/key}
@@ -82,6 +91,25 @@
 
 
 <style>
+    .empty-channel {
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+        min-height: 100%;
+        box-sizing: border-box;
+        padding: 32px;
+        text-align: center;
+        color: #b5bac1;
+    }
+    .empty-channel h2 {
+        color: #f2f3f5;
+        margin: 0 0 12px;
+    }
+    .empty-channel p {
+        max-width: 560px;
+        margin: 4px 0;
+    }
     .channel-wrapper {
         display: flex;
         flex-direction: column;
