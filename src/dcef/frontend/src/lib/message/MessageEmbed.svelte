@@ -1,24 +1,32 @@
 <script lang="ts">
     import { checkUrl } from "../../js/helpers";
-    import type { Embed } from "../../js/interfaces";
+    import type { Asset, Embed } from "../../js/interfaces";
+    import { fetchRedditPreviewMedia } from "../../js/stores/api";
     import MessageMarkdown from "./MessageMarkdown.svelte";
     import { renderTimestamp } from "../../js/time";
     import MessageTiledImages from "./MessageTiledImages.svelte";
     import Image from "../imagegallery/Image.svelte";
-    import Icon from "../icons/Icon.svelte";
     import MessageVideo from "./MessageVideo.svelte";
+    import VideoCenterPlayButton from "./VideoCenterPlayButton.svelte";
+    import MediaLoadingSkeleton from "./MediaLoadingSkeleton.svelte";
+    import MediaArchiveIndicator from "./MediaArchiveIndicator.svelte";
+    import { isDirectGifEmbed } from "../../js/directGifEmbeds";
+    import { getExternalVideoEmbed, isGyazoCaptureUrl } from "../../js/externalVideoProviders";
+    import { isEmbedMediaArchivingExcluded } from "../../js/embedMediaArchiveExclusions";
 
     interface MyProps {
         embed: Embed;
         messageState: any;
+        messageId: string;
     }
-    let { embed, messageState }: MyProps = $props();
+    let { embed, messageState, messageId }: MyProps = $props();
 
     let fieldGroups = $derived.by(()=> {
         let groups = []
         let currentGroup = []
-        for (let i = 0; i < embed.fields.length; i += 1) {
-            let currentField = embed.fields[i]
+        const fields = embed.fields ?? []
+        for (let i = 0; i < fields.length; i += 1) {
+            let currentField = fields[i]
             if (!currentField.isInline) {
                 if (currentGroup.length > 0) {
                     groups.push(currentGroup)
@@ -41,22 +49,59 @@
     })
 
     let playingVideo: boolean = $state(false)
+	let gifvUrl = $derived(embed.video ? checkUrl(embed.video) : "")
+	let loadedGifvUrl = $state<string | null>(null)
+	let failedGifvUrl = $state<string | null>(null)
+	let gifvLoaded = $derived(gifvUrl !== "" && loadedGifvUrl === gifvUrl)
+	let gifvFailedToLoad = $derived(gifvUrl !== "" && failedGifvUrl === gifvUrl)
+	let gifvAspectRatio = $derived(`${embed.video?.width ?? 16} / ${embed.video?.height ?? 9}`)
+	let gifvWidth = $derived(embed.video?.width && embed.video?.height
+		? `min(${embed.video.width}px, 550px, ${(400 * embed.video.width) / embed.video.height}px, calc(100% - 20px))`
+		: "min(550px, calc(100% - 20px))")
 
     let authorIconFailedToLoad: boolean = $state(false)
-    let thumbnailFailedToLoad: boolean = $state(false)
     let footerIconFailedToLoad: boolean = $state(false)
 
     const spotifyRegex = /https:\/\/open\.spotify\.com\/track\/([a-zA-Z0-9]+)/
     let spotifyId = $derived(embed.url?.match(spotifyRegex)?.[1] ?? null)
 
-    const youtubeRegex = /^(?:https?:)?\/\/(?:www|m)\.(?:youtube(?:-nocookie)?\.com|youtu.be)\/(?:[\w\-]+\?v=|embed\/|live\/|v\/)?[\w\-]+/
-	let youtubeId = $derived(embed.url?.match(youtubeRegex)?.[0]?.split('v=')?.[1]?.split('&')?.[0] ?? null);
+    let externalVideo = $derived(getExternalVideoEmbed(embed.url))
+    let embeddedVideo = $derived(withEmbedThumbnail(embed.video, embed.thumbnail))
+    let isGyazoVideo = $derived(isGyazoCaptureUrl(embed.url) && Boolean(embed.video))
+    let thirdPartyVideoTitle = $derived(
+        isThirdPartyEmbedUrl(embed.url) && embed.title?.trim()
+            ? embed.title.trim()
+            : undefined)
+    let archiveMediaExcluded = $derived(isEmbedMediaArchivingExcluded(embed))
+    let redditThreadUrl = $derived(getRedditThreadUrl(embed.url))
+    let redditPreviewImage = $derived(redditThreadUrl
+        ? embed.image ?? embed.images?.[0] ?? null
+        : null)
+    let resolvedRedditVideo = $state<Asset | null>(null)
+    let playableVideo = $derived(embeddedVideo ?? resolvedRedditVideo)
+    let hasPlayableVideo = $derived(Boolean(externalVideo || playableVideo))
 
-    const twitchClipRegex = /(?:https:\/\/)?clips\.twitch\.tv\/(\S+)/i
-    let twitchClipId = $derived(embed.url?.match(twitchClipRegex)?.[1] ?? null)
+    $effect(() => {
+        const threadUrl = redditThreadUrl
+        if (!threadUrl || embed.video) {
+            resolvedRedditVideo = null
+            return
+        }
+
+        let cancelled = false
+        fetchRedditPreviewMedia(threadUrl).then(media => {
+            if (!cancelled && media) {
+                resolvedRedditVideo = createRemoteVideoAsset(media.url)
+            }
+        })
+        return () => {
+            cancelled = true
+        }
+    })
 
     const tenorRegex = /(?:https?:)?\/\/(?:www\.)?(?:tenor\.com)\/(?:view|watch)\/[%\w\-]+-(\d+)/
     let tenorId = $derived(embed.url?.match(tenorRegex)?.[1] ?? null)
+    let isGifv = $derived(isDirectGifEmbed(embed))
 
     let smallThumbnail: boolean = $derived.by(() => {
         if (spotifyId) {
@@ -78,14 +123,85 @@
         playingVideo = true
     }
 
+    function getRedditThreadUrl(value: string | null | undefined): string | null {
+        if (!value) {
+            return null
+        }
+
+        try {
+            const url = new URL(value)
+            const hostname = url.hostname.toLowerCase()
+            const isRedditHost = hostname === "reddit.com"
+                || hostname.endsWith(".reddit.com")
+                || hostname === "redd.it"
+            const isThread = hostname === "redd.it" || url.pathname.toLowerCase().includes("/comments/")
+            return isRedditHost && isThread ? url.href : null
+        } catch {
+            return null
+        }
+    }
+
+    function createRemoteVideoAsset(url: string): Asset {
+        const fallback = redditPreviewImage
+        return {
+            ...(fallback ?? {}),
+            _id: url,
+            originalPath: url,
+            canonicalUrl: url,
+            localPath: "",
+            remotePath: url,
+            path: url,
+            extension: ".mp4",
+            type: "video",
+            width: fallback?.width ?? 0,
+            height: fallback?.height ?? 0,
+            sizeBytes: 0,
+            filenameWithHash: "reddit-preview.mp4",
+            filenameWithoutHash: "reddit-preview.mp4",
+            mediaId: undefined,
+            fileId: undefined,
+            thumbnailMediaId: undefined,
+            thumbnailFileId: undefined,
+            cachedThumbnailFileId: undefined,
+            thumbnailUrl: fallback ? checkUrl(fallback) : undefined,
+            isOffline: false,
+            colorDominant: fallback?.colorDominant ?? null,
+            colorPalette: fallback?.colorPalette ?? null
+        }
+    }
+
+    function withEmbedThumbnail(video: Asset | undefined, thumbnail: Asset | undefined): Asset | null {
+        if (!video || video.thumbnailUrl || !thumbnail) {
+            return video ?? null
+        }
+
+        return {
+            ...video,
+            thumbnailUrl: checkUrl(thumbnail)
+        }
+    }
+
+    function isThirdPartyEmbedUrl(value: string | null | undefined): boolean {
+        if (!value) {
+            return false
+        }
+
+        try {
+            const hostname = new URL(value).hostname.toLowerCase()
+            return hostname !== "discord.com"
+                && !hostname.endsWith(".discord.com")
+                && hostname !== "discordapp.com"
+                && !hostname.endsWith(".discordapp.com")
+                && hostname !== "discordapp.net"
+                && !hostname.endsWith(".discordapp.net")
+        } catch {
+            return false
+        }
+    }
+
     function onAuthorIconError(e: Event) {
         console.log('author icon error', e)
         authorIconFailedToLoad = true
-    }
-
-    function onThumbnailError(e: Event) {
-        console.log('thumbnail error', e)
-        thumbnailFailedToLoad = true
     }
 
     function onFooterIconError(e: Event) {
@@ -95,9 +211,31 @@
 </script>
 
 <div class="main-wrapper">
-    {#if tenorId}
-        {#if embed.hasOwnProperty('video')}
-            <video class="videogif" src="{checkUrl(embed.video)}" autoplay loop muted playsinline/>
+    {#if isGifv}
+        {#if embed.video}
+            <div class="gifv-wrapper" style:aspect-ratio={gifvAspectRatio} style:width={gifvWidth}>
+                {#if !archiveMediaExcluded}
+                    <MediaArchiveIndicator asset={embed.video} {messageId} mediaKind="embed-video" />
+                {/if}
+                <MediaLoadingSkeleton active={!gifvLoaded && !gifvFailedToLoad} />
+                <video
+                    class="videogif"
+                    class:loaded={gifvLoaded || gifvFailedToLoad}
+                    src={gifvUrl}
+                    autoplay
+                    loop
+                    muted
+                    playsinline
+                    onloadeddata={() => {
+                        loadedGifvUrl = gifvUrl
+                        failedGifvUrl = null
+                    }}
+                    onerror={() => {
+                        loadedGifvUrl = null
+                        failedGifvUrl = gifvUrl
+                    }}
+                ></video>
+            </div>
         {:else}
             <!-- workaround for older exports (embed tenor iframe) -->
             <div class="embed-tenor-container">
@@ -106,23 +244,27 @@
         {/if}
     {:else if spotifyId}
         <iframe class="spotify-iframe" src={`https://open.spotify.com/embed/track/${spotifyId}`} frameborder="0" sandbox="allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-same-origin allow-scripts" style="width: 400px; height: 80px;"></iframe>
-    {:else if embed.video && embed.title === "" && embed.description === ""}
-        <MessageVideo attachment={embed.video} />
+    {:else if embeddedVideo && (isGyazoVideo || (embed.title === "" && embed.description === ""))}
+        <MessageVideo attachment={embeddedVideo} {messageId} mediaKind="embed-video" showArchiveIndicator={!archiveMediaExcluded} mediaTitle={thirdPartyVideoTitle} mediaLink={thirdPartyVideoTitle ? embed.url : undefined} />
     {:else}
         <div class="embed" class:smallthumbnail={smallThumbnail} style="border-left: {embed.color} 4px solid;">
             <div class="header-row">
                 <div class="header-col">
-                    {#if youtubeId}
-                        <div class="website-name">YouTube</div>
-                    {:else if twitchClipId}
-                        <div class="website-name">Twitch</div>
+                    {#if externalVideo}
+                        <div class="website-name">{externalVideo.name}</div>
                     {/if}
                     {#if embed.author}
                         <div class="author-name">
                             {#if embed.author.icon && !authorIconFailedToLoad}
-                                <img class="author-icon" src={checkUrl(embed.author.icon)} alt="" width="24" height="24" onerror={onAuthorIconError} />
+                                {#if redditThreadUrl}
+                                    <a class="reddit-home-link" href="https://www.reddit.com/" target="_blank" rel="noopener noreferrer" aria-label="Open Reddit homepage">
+                                        <img class="author-icon" src={checkUrl(embed.author.icon)} alt="" width="24" height="24" onerror={onAuthorIconError} />
+                                    </a>
+                                {:else}
+                                    <img class="author-icon" src={checkUrl(embed.author.icon)} alt="" width="24" height="24" onerror={onAuthorIconError} />
+                                {/if}
                             {/if}
-                            <a href={embed.author.url} target="_blank" rel="noopener noreferrer">{embed.author.name}</a>
+                            <a href={redditThreadUrl ?? embed.author.url} target="_blank" rel="noopener noreferrer">{embed.author.name}</a>
                         </div>
                     {/if}
 
@@ -134,13 +276,13 @@
                         {/if}
                     </div>
 
-                    {#if !twitchClipId}
+                    {#if externalVideo?.name !== "Twitch"}
                         <div class="description">
                             <MessageMarkdown content={embed.description} />
                         </div>
                     {/if}
 
-                    {#if embed.fields.length > 0}
+                    {#if (embed.fields?.length ?? 0) > 0}
                         <div class="fields">
                             {#each fieldGroups as group}
                                 {#each group as field}
@@ -157,22 +299,14 @@
                 {#if embed.thumbnail && !playingVideo}
                     <div class="thumb-col">
                         <div class="thumbnail-wrapper">
-                            {#if thumbnailFailedToLoad}
-                                <Icon name="placeholder/poop" width={smallThumbnail ? 80 : 200} height={smallThumbnail ? 42 : 104} />
-                            {:else}
-                                <Image asset={embed.thumbnail} onerror={onThumbnailError} forceSpoiler={messageState.messageContentLinkIsSpoilered} class="global-embedthumb" />
-                                {#if embed.video}
-                                    <div class="pill">
-                                        {#if twitchClipId || youtubeId}
-                                            <button class="icon" onclick={playVideo}>
-                                                <Icon name="player/play" width={24} />
-                                            </button>
-                                        {/if}
-                                        <a class="icon" href={embed.url} target="_blank" rel="noopener noreferrer">
-                                            <Icon name="player/openLink" width={24} />
-                                        </a>
-                                    </div>
-                                {/if}
+                            <Image asset={embed.thumbnail} reserveSpace={true} showCloudIndicator={!archiveMediaExcluded} {messageId} mediaKind="embed-thumbnail" forceSpoiler={messageState.messageContentLinkIsSpoilered} class="global-embedthumb" />
+                            {#if redditThreadUrl}
+                                <a class="reddit-hotspot reddit-thread-header" href={redditThreadUrl} target="_blank" rel="noopener noreferrer" aria-label="Open Reddit post or comment"></a>
+                                <a class="reddit-hotspot reddit-home" href="https://www.reddit.com/" target="_blank" rel="noopener noreferrer" aria-label="Open Reddit homepage"></a>
+                                <a class="reddit-hotspot reddit-thread-stats" href={redditThreadUrl} target="_blank" rel="noopener noreferrer" aria-label="Open Reddit post or comment"></a>
+                            {/if}
+                            {#if hasPlayableVideo}
+                                <VideoCenterPlayButton onclick={playVideo} />
                             {/if}
                         </div>
                     </div>
@@ -180,30 +314,53 @@
 
                 {#if !embed.thumbnail && embed.video}
                     <div class="embed-video-2">
-                        <MessageVideo attachment={embed.video} />
+                        <MessageVideo attachment={embed.video} {messageId} mediaKind="embed-video" showArchiveIndicator={!archiveMediaExcluded} />
                     </div>
                 {/if}
 
                 {#if playingVideo}
-                    {#if twitchClipId}
-                        <iframe
-                            class="twitch-iframe"
-                            allow="autoplay" frameborder="0" scrolling="no" sandbox="allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-same-origin allow-scripts" provider="Twitch"
-                            src="https://clips.twitch.tv/embed?clip={twitchClipId}&parent={window.location.hostname}"
-                            width="400" height="232" allowfullscreen="">
-                        </iframe>
-                    {:else if youtubeId}
-                        <!-- won't autoplay with sponsorblock browser extension for some reason -->
-                        <div class="youtube-video-container">
-                            <iframe class="chatlog__embed-youtube" src="http://www.youtube.com/embed/{youtubeId}?rel=0&modestbranding=1&autohide=1&mute=0&showinfo=0&controls=1&autoplay=1" width="400" height="225" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen frameborder="0" scrolling="no" sandbox="allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-same-origin allow-scripts"></iframe>
+                    {#if externalVideo && !playableVideo}
+                        <div class="provider-video-container" style:aspect-ratio={`${embed.video?.width ?? embed.thumbnail?.width ?? 16} / ${embed.video?.height ?? embed.thumbnail?.height ?? 9}`}>
+                            <!-- Provider URLs are constructed from an allow-list in externalVideoProviders.ts. -->
+                            <iframe
+                                title={`${externalVideo.name} video player`}
+                                src={externalVideo.src}
+                                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen"
+                                frameborder="0"
+                                scrolling="no"
+                                sandbox="allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-presentation allow-same-origin allow-scripts"
+                                allowfullscreen
+                            ></iframe>
+                            {#if thirdPartyVideoTitle}
+                                <a
+                                    class="provider-video-title"
+                                    href={embed.url}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                >{thirdPartyVideoTitle}</a>
+                            {/if}
+                        </div>
+                    {:else if playableVideo}
+                        <div class="embed-video-2">
+                            <MessageVideo attachment={playableVideo} {messageId} mediaKind="embed-video" showArchiveIndicator={Boolean(embed.video) && !archiveMediaExcluded} mediaTitle={thirdPartyVideoTitle} mediaLink={thirdPartyVideoTitle ? embed.url : undefined} />
                         </div>
                     {/if}
                 {/if}
             </div>
 
-            {#if embed.images.length > 0}
+            {#if redditPreviewImage && !playingVideo}
+                <div class="reddit-preview-wrapper">
+                    <Image asset={redditPreviewImage} reserveSpace={true} showCloudIndicator={!archiveMediaExcluded} {messageId} mediaKind="embed-image" forceSpoiler={messageState.messageContentLinkIsSpoilered} class="global-embedthumb" />
+                    <a class="reddit-hotspot reddit-thread-header" href={redditThreadUrl} target="_blank" rel="noopener noreferrer" aria-label="Open Reddit post or comment"></a>
+                    <a class="reddit-hotspot reddit-home" href="https://www.reddit.com/" target="_blank" rel="noopener noreferrer" aria-label="Open Reddit homepage"></a>
+                    <a class="reddit-hotspot reddit-thread-stats" href={redditThreadUrl} target="_blank" rel="noopener noreferrer" aria-label="Open Reddit post or comment"></a>
+                    {#if hasPlayableVideo}
+                        <VideoCenterPlayButton onclick={playVideo} />
+                    {/if}
+                </div>
+            {:else if embed.images.length > 0 && !redditThreadUrl}
                 <div class="image-embeds-wrapper">
-                    <MessageTiledImages images={embed.images} isAttachment={false} />
+                    <MessageTiledImages images={embed.images} isAttachment={false} {messageId} mediaKind="embed-image" showCloudIndicators={!archiveMediaExcluded} />
                 </div>
             {/if}
 
@@ -212,9 +369,22 @@
                 <div class="footer">
                     <div class="footer-row">
                         {#if embed.footer.icon && !footerIconFailedToLoad}
-                            <img class="footer-icon" src={checkUrl(embed.footer.icon)} alt="" width="20" height="20" onerror={onFooterIconError} />
+                            {#if redditThreadUrl}
+                                <a class="footer-home-link" href="https://www.reddit.com/" target="_blank" rel="noopener noreferrer" aria-label="Open Reddit homepage">
+                                    <img class="footer-icon" src={checkUrl(embed.footer.icon)} alt="" width="20" height="20" onerror={onFooterIconError} />
+                                </a>
+                            {:else}
+                                <img class="footer-icon" src={checkUrl(embed.footer.icon)} alt="" width="20" height="20" onerror={onFooterIconError} />
+                            {/if}
                         {/if}
-                        <span class="footer-text">{embed.footer?.text}</span><span class="footer-separator">•</span><span class="footer-timestamp">{renderTimestamp(embed.timestamp)}</span>
+                        {#if redditThreadUrl}
+                            <a class="footer-text footer-link" href={redditThreadUrl} target="_blank" rel="noopener noreferrer">{embed.footer?.text}</a>
+                        {:else}
+                            <span class="footer-text">{embed.footer?.text}</span>
+                        {/if}
+                        {#if embed.timestamp}
+                            <span class="footer-separator">•</span><span class="footer-timestamp">{renderTimestamp(embed.timestamp)}</span>
+                        {/if}
                     </div>
                 </div>
             {/if}
@@ -223,24 +393,79 @@
 </div>
 
 <style>
-    .youtube-video-container {
+    .provider-video-container {
         margin-top: 16px;
 		position: relative;
 		width: 100%;
-		height: 0;
-		padding-bottom: 56.25%;
+        max-width: 400px;
+        max-height: 400px;
+        overflow: hidden;
+        border-radius: 3px;
+        background: #000;
 	}
 
-	.youtube-video-container iframe {
+	.provider-video-container iframe {
 		position: absolute;
 		top: 0;
 		left: 0;
 		width: 100%;
 		height: 100%;
 	}
+
+    .provider-video-title {
+        position: absolute;
+        z-index: 2;
+        top: 13px;
+        left: 14px;
+        width: fit-content;
+        max-width: calc(100% - 28px);
+        overflow: hidden;
+        padding: 4px 8px;
+        border-radius: 4px;
+        color: #f2f3f5;
+        font-size: 14px;
+        font-weight: 600;
+        line-height: 20px;
+        background: rgba(17, 18, 20, 0.76);
+        box-sizing: border-box;
+        text-overflow: ellipsis;
+        text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+        white-space: nowrap;
+        text-decoration: none;
+        opacity: 0;
+        pointer-events: none;
+        transform: translateY(calc(-100% - 13px));
+        transition: opacity 160ms ease, transform 160ms ease;
+    }
+
+    .provider-video-container:hover .provider-video-title,
+    .provider-video-container:focus-within .provider-video-title {
+        opacity: 1;
+        pointer-events: auto;
+        transform: translateY(0);
+    }
     .videogif {
-        max-width: 550px;
+        position: relative;
+        z-index: 1;
+        max-width: min(550px, 100%);
+		max-height: 400px;
         width: 100%;
+        display: block;
+        border-radius: 4px;
+		opacity: 0;
+		transition: opacity 120ms ease-out;
+    }
+    .videogif.loaded {
+		opacity: 1;
+    }
+    .gifv-wrapper {
+        position: relative;
+        width: fit-content;
+        max-width: min(550px, 100%);
+		max-height: 400px;
+        overflow: hidden;
+        border-radius: 4px;
+        background: #2b2d31;
     }
     .embed-tenor-container {
 		pointer-events: none;
@@ -302,6 +527,11 @@
                     margin-right: 8px;
                 }
 
+                .reddit-home-link {
+                    display: flex;
+                    flex: 0 0 auto;
+                }
+
                 a {
                     color: #f2f3f5;
                     text-decoration: none;
@@ -344,44 +574,49 @@
                 width: 100%;
                 max-width: 400px;
 
-                .pill {
-                    position: absolute;
-
-                    display: flex;
-                    justify-content: space-between;
-                    gap: 3px;
-
-                    top: 50%;
-                    left: 50%;
-                    transform: translate(-50%, -50%);
-
-                    height: 24px;
-                    padding: 12px;
-                    border-radius: 24px;
-
-                    box-sizing: content-box;
-
-
-                    background-color: rgba(0, 0, 0, 0.6);
-                    .icon {
-                        opacity: .6;
-                        cursor: pointer;
-                        display: block;
-                        color: white;
-                    }
-                    .icon:hover {
-                        opacity: 1;
-                    }
-                }
             }
         }
 
-        .twitch-iframe {
-            margin-top: 16px;
+        .reddit-preview-wrapper {
+            position: relative;
             width: 100%;
-            border-radius: 3px;
             max-width: 400px;
-            max-height: 232px;
+            margin-top: 16px;
+            overflow: hidden;
+            border-radius: 3px;
+        }
+
+        .reddit-hotspot {
+            position: absolute;
+            z-index: 2;
+            display: block;
+            border-radius: 4px;
+        }
+
+        .reddit-hotspot:focus-visible {
+            outline: 2px solid #fff;
+            outline-offset: -2px;
+        }
+
+        .reddit-thread-header {
+            top: 0;
+            left: 0;
+            width: 42%;
+            height: 28%;
+        }
+
+        .reddit-home {
+            top: 0;
+            right: 0;
+            width: 17%;
+            height: 28%;
+        }
+
+        .reddit-thread-stats {
+            bottom: 0;
+            left: 0;
+            width: 42%;
+            height: 25%;
         }
 
         .fields {
@@ -439,6 +674,20 @@
 
                 .footer-icon {
                     margin-right: 8px;
+                }
+
+                .footer-home-link {
+                    display: flex;
+                    flex: 0 0 auto;
+                }
+
+                .footer-link {
+                    color: inherit;
+                    text-decoration: none;
+                }
+
+                .footer-link:hover {
+                    text-decoration: underline;
                 }
 
                 .footer-separator {

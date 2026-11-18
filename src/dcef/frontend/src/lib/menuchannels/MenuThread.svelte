@@ -2,7 +2,7 @@
     import { copyTextToClipboard } from "../../js/helpers";
     import type { Channel } from "../../js/interfaces";
     import { getGuildState } from "../../js/stores/guildState.svelte";
-    import { contextMenuItems } from "../../js/stores/menuStore";
+    import { contextMenuItems, handleContextMenu } from "../../js/stores/menuStore";
     import { linkHandler } from "../../js/stores/settingsStore.svelte";
     import { getLayoutState } from "../../js/stores/layoutState.svelte";
 
@@ -58,7 +58,7 @@
     const layoutState = getLayoutState()
 </script>
 
-<div class="thread" class:selected={thread._id == guildState.threadId} on:click={()=>changeThread(thread.guildId, parentChannelId, thread._id)} on:contextmenu|preventDefault={(e) => onThreadRightClick(e, thread._id, thread.name)}>
+<div class="thread" class:selected={thread._id == guildState.threadId} on:click={()=>changeThread(thread.guildId, parentChannelId, thread._id)} on:contextmenu={(e) => handleContextMenu(e, () => onThreadRightClick(e, thread._id, thread.name))}>
     <div class="thread-icon">
         {#if isLast}
             <svg class="up" width="12" height="11" viewBox="0 0 12 11" fill="none" aria-hidden="true">
@@ -127,10 +127,10 @@
         -webkit-line-clamp: 1;
         -webkit-box-orient: vertical;
         color: #949BA4;
-        line-height: 20px;
+        line-height: 18px;
         font-weight: 500;
-        font-size: 16px;
-        height: 20px;
+        font-size: 14px;
+        height: 18px;
         overflow: hidden;
     }
     .selected .thread-name {

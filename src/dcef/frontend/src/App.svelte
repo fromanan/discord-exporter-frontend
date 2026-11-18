@@ -7,16 +7,23 @@
     import HeaderMain from "./lib/HeaderMain.svelte";
     import SearchResults from "./lib/search/SearchResults.svelte";
     import Channel from "./lib/Channel.svelte";
+    import Forum from "./lib/Forum.svelte";
+    import ServerGuide from "./lib/ServerGuide.svelte";
+    import ChannelsAndRoles from "./lib/ChannelsAndRoles.svelte";
     import Thread from "./lib/Thread.svelte";
     import Settings from "./lib/settings/Settings.svelte";
     import ContextMenu from "./lib/components/menu/ContextMenu.svelte";
     import { onMount } from "svelte";
-    import { position } from "./js/stores/menuStore";
+    import { contextMenuItems, position } from "./js/stores/menuStore";
     import { font, hideSpoilers, theme } from './js/stores/settingsStore.svelte';
     import { getGuildState, isChannel } from './js/stores/guildState.svelte';
     import { getLayoutState } from './js/stores/layoutState.svelte';
     import ViewUser from './lib/viewuser/ViewUser.svelte';
     import ImageGallery from './lib/imagegallery/ImageGallery.svelte';
+    import { fetchArchiveRevision } from './js/stores/api';
+    import AccountSwitcher from './lib/accountswitcher/AccountSwitcher.svelte';
+
+    let archiveRevision: number | null = null;
 
     onMount(() => {
       const unsubscribe1 = theme.subscribe(value => {
@@ -24,29 +31,67 @@
       });
 
       const unsubscribe2 = hideSpoilers.subscribe(value => {
-        document.documentElement.setAttribute('data-hidespoilers', value);
+        document.documentElement.setAttribute('data-hidespoilers', String(value));
       });
 
       const unsubscribe3 = font.subscribe(value => {
         document.documentElement.setAttribute('data-font', value);
       });
 
+      let checkingArchiveRevision = false;
+      const checkArchiveRevision = async () => {
+        if (checkingArchiveRevision) {
+          return;
+        }
+        checkingArchiveRevision = true;
+        try {
+          const revision = await fetchArchiveRevision();
+          if (revision === null) {
+            return;
+          }
+          if (revision !== archiveRevision) {
+            await guildState.refreshArchiveIndex();
+          }
+          archiveRevision = revision;
+        }
+        finally {
+          checkingArchiveRevision = false;
+        }
+      };
+      void checkArchiveRevision();
+      const archiveRefreshTimer = window.setInterval(checkArchiveRevision, 5000);
+
       return () => {
         unsubscribe1()
         unsubscribe2()
         unsubscribe3()
+        window.clearInterval(archiveRefreshTimer)
       }
     })
 
     const guildState = getGuildState()
     const layoutState = getLayoutState()
 
+    $: selectedChannelName = guildState.channel?.name ?? null
+    $: selectedGuildName = guildState.guild?.name ?? null
+    $: pageTitle = selectedChannelName && selectedGuildName
+      ? `Discord | #${selectedChannelName} | ${selectedGuildName}`
+      : selectedGuildName
+        ? `Discord | ${selectedGuildName}`
+        : "Discord"
+
     /* capture mouse position for right click context menu */
-    function handleMousemove(event) {
+    function handleMousemove(event: MouseEvent) {
       $position = { x: event.clientX, y: event.clientY };
     }
     const handleThrottledMousemove = throttle(handleMousemove, 100, { leading: false, trailing: true });
 
+    function handleContextMenuCapture(event: MouseEvent) {
+      if (event.ctrlKey) {
+        $contextMenuItems = [];
+        event.stopPropagation();
+      }
+    }
 
     // called from parsed markdown channel and message links
     // window.globalSetGuild = async (guildId: string) => {
@@ -63,8 +108,10 @@
     }
 </script>
 
+<svelte:window on:contextmenu|capture={handleContextMenuCapture} />
+
 <svelte:head>
-    <title>DCE-Frontend</title>
+    <title>{pageTitle}</title>
     <meta name="description" content="View your JSON DiscordChatExporter exports as if you were using Discord interface"/>
 </svelte:head>
 
@@ -82,9 +129,20 @@
       <div class="guilds"><Guilds /></div>
       <div class="channels"><MenuCategories /></div>
       <div class="header-main"><HeaderMain /></div>
-      <div class="channel"><Channel /></div>
+      <div class="channel">
+        {#if guildState.channel?.type === "GuildServerGuide"}
+          <ServerGuide />
+        {:else if guildState.channel?.type === "GuildChannelsAndRoles"}
+          <ChannelsAndRoles />
+        {:else if guildState.channel?.type === "GuildForum" || guildState.channel?.type === "GuildMedia"}
+          <Forum />
+        {:else}
+          <Channel {archiveRevision} />
+        {/if}
+      </div>
       <div class="search-results"><SearchResults /></div>
-      <div class="thread"><Thread /></div>
+      <div class="thread"><Thread {archiveRevision} /></div>
+      <div class="account-bar"><AccountSwitcher /></div>
     </main>
   <div class="settings" class:settingsshown={layoutState.settingsshown}><Settings /></div>
   <ContextMenu />
@@ -142,12 +200,23 @@
 
   /* COMMON */
   main {
+    position: relative;
     display: grid;
     width: 100%;
     height: calc(100% - 7px);
     background-color: #1E1F22;
     margin: 7px 0 0 0;
     box-sizing: border-box;
+  }
+  .account-bar {
+    position: absolute;
+    left: 12px;
+    bottom: 16px;
+    z-index: 20;
+    width: calc(70px + min(236px, 100svw - 100px) - 24px);
+    height: 56px;
+    border-radius: 8px;
+    background-color: #232428;
   }
   main.mobile {
     margin: 0;
@@ -175,7 +244,7 @@
     grid-template-areas:
     "guilds channels header-main    thread"
     "guilds channels        channel thread";
-    grid-template-columns: 70px 236px 1fr 1fr;
+    grid-template-columns: 70px 236px minmax(0, 1fr) clamp(340px, 28vw, 430px);
     grid-template-rows: 47px 1fr;
   }
   main.desktop.searchhidden.threadshown .search-results {

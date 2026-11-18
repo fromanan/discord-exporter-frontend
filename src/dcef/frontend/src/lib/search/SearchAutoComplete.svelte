@@ -1,6 +1,7 @@
 <script lang="ts">
     import { checkUrl } from "../../js/helpers";
     import { fetchAutocomplete } from "../../js/stores/api";
+    import { userSearchToken } from "../../js/searchRequests";
     import { findChannelsByName, findThreadsByName, getGuildState } from "../../js/stores/guildState.svelte";
     import Icon from "../icons/Icon.svelte";
     import ChannelIcon from "../menuchannels/ChannelIcon.svelte";
@@ -233,7 +234,9 @@
     export function arrowDown() {
         selectedSuggestionIndex = Math.min(selectedSuggestionIndex + 1, searchOptions.length - 1);
     }
+    let autocompleteRevision = 0;
     export async function promptChanged() {
+        const revision = ++autocompleteRevision;
         selectedSuggestionIndex = -1;
         if (searchState.selection.lastWord.length === 0) {
             dateOptions = []
@@ -255,10 +258,12 @@
             const emojisPromise = fetchAutocomplete(guildState.guildId, "reactions", searchState.selection.lastKey, 3)
             channelAutoComplete = findChannelsByName(searchState.selection.lastKey).slice(0, 3)
             threadAutoComplete = findThreadsByName(searchState.selection.lastKey).slice(0, 3)
-            fromAutoComplete = await usersPromise
-            mentionAutoComplete = await usersPromise
-            filenameAutoComplete = await fileNamePromise
-            emojisAutoComplete = await emojisPromise
+            const [users, filenames, emojis] = await Promise.all([usersPromise, fileNamePromise, emojisPromise]);
+            if (revision !== autocompleteRevision) return;
+            fromAutoComplete = users
+            mentionAutoComplete = users
+            filenameAutoComplete = filenames
+            emojisAutoComplete = emojis
             selectBoolean = false
             showCalendar = false
         }
@@ -268,7 +273,9 @@
             threadAutoComplete = []
             filenameAutoComplete = []
             emojisAutoComplete = []
-            fromAutoComplete = await fetchAutocomplete(guildState.guildId, "users", searchState.selection.lastValue, 10)
+            const users = await fetchAutocomplete(guildState.guildId, "users", searchState.selection.lastValue, 10);
+            if (revision !== autocompleteRevision) return;
+            fromAutoComplete = users
             selectBoolean = false
             showCalendar = false
         }
@@ -278,7 +285,9 @@
             threadAutoComplete = []
             filenameAutoComplete = []
             emojisAutoComplete = []
-            mentionAutoComplete = await fetchAutocomplete(guildState.guildId, "users", searchState.selection.lastValue, 10)
+            const users = await fetchAutocomplete(guildState.guildId, "users", searchState.selection.lastValue, 10);
+            if (revision !== autocompleteRevision) return;
+            mentionAutoComplete = users
             selectBoolean = false
             showCalendar = false
         }
@@ -298,7 +307,9 @@
             channelAutoComplete = []
             threadAutoComplete = []
             emojisAutoComplete = []
-            filenameAutoComplete = await fetchAutocomplete(guildState.guildId, "filenames", searchState.selection.lastValue, 10)
+            const filenames = await fetchAutocomplete(guildState.guildId, "filenames", searchState.selection.lastValue, 10);
+            if (revision !== autocompleteRevision) return;
+            filenameAutoComplete = filenames
             selectBoolean = false
             showCalendar = false
         }
@@ -338,7 +349,9 @@
             channelAutoComplete = []
             threadAutoComplete = []
             filenameAutoComplete = []
-            emojisAutoComplete = await fetchAutocomplete(guildState.guildId, "reactions", searchState.selection.lastValue, 10)
+            const emojis = await fetchAutocomplete(guildState.guildId, "reactions", searchState.selection.lastValue, 10);
+            if (revision !== autocompleteRevision) return;
+            emojisAutoComplete = emojis
             mentionAutoComplete = []
             selectBoolean = false
             showCalendar = false
@@ -412,7 +425,7 @@
                     <div>From User</div>
                 </div>
                 {#each fromAutoComplete as user, i}
-                    <div class="item item-user" class:highlighted={selectedSuggestionIndex === i} onclick={()=>selectFullSuggestion(`from:${escapeValue(user.key)} `)} title={user.description2}>
+                    <div class="item item-user" class:highlighted={selectedSuggestionIndex === i} onclick={()=>selectFullSuggestion(userSearchToken("from", user.id))} title={user.description2}>
                         {#if isKey}
                             <span class="key">from:</span>
                         {/if}
@@ -432,7 +445,7 @@
                     <div>Mentions User</div>
                 </div>
                 {#each mentionAutoComplete as user, i}
-                    <div class="item item-user" class:highlighted={selectedSuggestionIndex === i} onclick={()=>selectFullSuggestion(`mentions:${escapeValue(user.key)} `)} title={user.description2}>
+                    <div class="item item-user" class:highlighted={selectedSuggestionIndex === i} onclick={()=>selectFullSuggestion(userSearchToken("mentions", user.id))} title={user.description2}>
                         {#if isKey}
                             <span class="key">mentions:</span>
                         {/if}

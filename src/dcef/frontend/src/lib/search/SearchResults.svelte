@@ -22,7 +22,7 @@
     }
 
     async function fetchMessagesWrapper(direction: "before" | "after" | "around" | "first" | "last", messageId: string | null = null, limit: number) {
-        return fetchSearch(apiGuildId, searchState.searchPrompt, direction, messageId, limit)
+        return fetchSearch(apiGuildId, searchState.submittedSearchPrompt, direction, messageId, limit)
     }
 </script>
 
@@ -77,7 +77,7 @@
 
 
 <div class="channel-wrapper">
-    {#key searchState.submittedSearchPrompt}
+    {#key `${apiGuildId}:${searchState.submittedSearchPrompt}`}
         {#if searchState.submittedSearchPrompt !== ""}
             <div class="search-header">
                 <div class="header-txt">

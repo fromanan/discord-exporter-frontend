@@ -1,14 +1,16 @@
 <script lang="ts">
     import type { Author } from "../../js/interfaces";
     import { nameRenderer } from "../../js/stores/settingsStore.svelte";
+    import { handleContextMenu } from "../../js/stores/menuStore";
     import Icon from "../icons/Icon.svelte";
     import { onUserRightClick } from "./messageRightClick";
 
     interface MyProps {
         author: Author
         messageState?: any
+        isOriginalPoster?: boolean
     }
-    let { author, messageState}: MyProps = $props();
+    let { author, messageState, isOriginalPoster=false}: MyProps = $props();
 
     function full_name(author: Author) {
         return author.name
@@ -31,7 +33,7 @@
 </script>
 
 
-<button class="username" class:verified={tag === "SYSTEM"} title={nickname_only(author)} data-user-id={author._id} on:click on:contextmenu|preventDefault={e=>onUserRightClick(e, author)}>
+<button class="username" class:verified={tag === "SYSTEM"} title={nickname_only(author)} data-user-id={author._id} on:click on:contextmenu={e => handleContextMenu(e, () => onUserRightClick(e, author))}>
     {#if $nameRenderer === 'handle' }
         <span class="hover-underline" style="color:{author.color}">{full_name(author)}</span>
     {:else if $nameRenderer === 'nickname' }
@@ -53,6 +55,9 @@
         {/if}
         {tag}
     </span>
+{/if}
+{#if isOriginalPoster}
+    <span class="tag-op">OP</span>
 {/if}
 
 <style>
@@ -89,5 +94,18 @@
             place-items: center;
             margin-left: -4px;
         }
+    }
+
+    .tag-op {
+        position: relative;
+        top: -0.1rem;
+        margin-left: 0.3rem;
+        padding: 0 4px;
+        border-radius: 3px;
+        background-color: #b5bac1;
+        color: #313338;
+        font-size: 0.625rem;
+        font-weight: 600;
+        line-height: 1.3;
     }
 </style>

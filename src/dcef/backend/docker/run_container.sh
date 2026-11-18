@@ -26,6 +26,7 @@ mkdir -p /dcef/cache/db
 mongod --dbpath "/dcef/cache/db/" --wiredTigerCacheSizeGB 1.5 &
 cd /dcef/backend/preprocess
 python main_mongo.py docker
+python main_mongo.py docker --watch &
 cd /dcef/backend/fastapi
 python prod.py &
 if [ "$db_rebuilt" = true ]; then

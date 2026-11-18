@@ -1,5 +1,5 @@
 <script lang="ts">
-    import type { Message } from "../../js/interfaces";
+    import type { InvitePreview, Message } from "../../js/interfaces";
     import MessageSystemNotification from "./MessageSystemNotification.svelte";
     import MessageOrdinary from "./MessageOrdinary.svelte";
     import { MessageType } from "./messageEnums";
@@ -15,103 +15,73 @@
         previousMessage: Message | null;
         mergeMessages?: boolean;
         showJump?: boolean;
+        originalPosterId?: string | null;
     }
-    let { message, previousMessage, mergeMessages=true, showJump=false}: MyProps = $props();
+    let {
+        message,
+        previousMessage,
+        mergeMessages=true,
+        showJump=false,
+        originalPosterId=null
+    }: MyProps = $props();
     const isDebugModeEnabled = typeof localStorage !== "undefined" && localStorage.getItem("DEBUG") === "1";
 
+    function isSystemNotification(messageType: string): boolean {
+        return [
+            "RecipientAdd", "RecipientRemove", "Call", "ChannelNameChange", "ChannelIconChange",
+            "ChannelPinnedMessage", "GuildMemberJoin", "ThreadCreated", MessageType.GuildBoost,
+            MessageType.GuildBoostTier1, MessageType.GuildBoostTier2, MessageType.GuildBoostTier3,
+        ].includes(messageType)
+    }
+
+    function shouldMergeMessages(previousMessage: Message | null, message: Message, allowMerging: boolean): boolean {
+        if (!allowMerging || !previousMessage) {
+            return false
+        }
+        if (previousMessage.author?._id !== message.author?._id || previousMessage.channelId !== message.channelId) {
+            return false
+        }
+        if (snowflakeToDate(message._id).getTime() - snowflakeToDate(previousMessage._id).getTime() > 7 * 60 * 1000) {
+            return false
+        }
+        if (message.type === "Reply") {
+            return false
+        }
+        if (previousMessage.type !== message.type && !(previousMessage.type === "Reply" && message.type === "Default")) {
+            return false
+        }
+        return !isSystemNotification(message.type) && previousMessage.author.nickname === message.author.nickname
+    }
+
     function getMessageState(message: Message, previousMessage: Message | null) {
-        function isSystemNotification(messageType: string): boolean {
-            // https://github.com/Tyrrrz/DiscordChatExporter/blob/81a6d363d1e503787e1aebc5e30b411ef796ef77/DiscordChatExporter.Core/Discord/Data/MessageKind.cs#L20
-            const systemNotificationTypes = [
-                "RecipientAdd",  // 1
-                "RecipientRemove",  // 2
-                "Call",  // 3
-                "ChannelNameChange",  // 4
-                "ChannelIconChange",  // 5
-                "ChannelPinnedMessage",  // 6
-                "GuildMemberJoin",  // 7
-                "ThreadCreated",  // 18
-                MessageType.GuildBoost,
-                MessageType.GuildBoostTier1,
-                MessageType.GuildBoostTier2,
-                MessageType.GuildBoostTier3
-            ]
+        function invitePreviews(message: Message): InvitePreview[] {
+            const inviteRegex = /(?:https?:\/\/)?(?:www\.)?(?:discord(?:app)?\.com\/invite|discord\.gg)\/([\w-]+)/gi;
+            const archivedInvites = new Map(
+                (message.invites ?? []).map(invite => [invite.code, invite])
+            );
+            const previews: InvitePreview[] = [];
+            const seen = new Set<string>();
 
-            const notSystemNotificationTypes = [
-                "Default",  // 0
-                "Reply",  // 19
-            ]
+            for (const match of message.content[0].content.matchAll(inviteRegex)) {
+                const code = match[1];
+                if (!seen.has(code)) {
+                    previews.push(archivedInvites.get(code) ?? { code });
+                    seen.add(code);
+                }
+            }
 
-            return systemNotificationTypes.includes(messageType)
+            return previews;
         }
 
-        function inviteIds(messageContent: string): string[] {
-            const inviteRegex = /(https?:\/\/)?(www\.)?((discordapp\.com\/invite)|(discord\.gg))\/(\w+)/
-            let ids = []
-            let match = messageContent.match(inviteRegex)
-            while (match) {
-                ids.push(match[6])
-                messageContent = messageContent.replace(match[0], "")
-                match = messageContent.match(inviteRegex)
-            }
-            return ids
-        }
-
-        /**
-         * Should this message merge with the previous message?
-         */
-        function shouldMerge(previousMessage: Message | null, message: Message) {
-            if (!mergeMessages) {
-                return false;
-            }
-            // null checks
-            if (!previousMessage) {
-                console.log("should merge - NO PREVIOUS MESSAGE")
-                return false;
-            }
-            if (!message) {
-                return false;
-            }
-
-            // if from different author, don't merge
-            if (previousMessage.author?._id !== message.author._id) {
-                return false;
-            }
-
-            // if from different channel, don't merge
-            if (previousMessage.channelId !== message.channelId) {
-                return false;
-            }
-
-
-            // if more than 5 minutes between messages, don't merge
-            let prevDate = snowflakeToDate(previousMessage._id);
-            let date = snowflakeToDate(message._id);
-            if (date.getTime() - prevDate.getTime() > 7 * 60 * 1000) {
-                return false;
-            }
-
-            // if is reply, don't merge
-            if (message.type === "Reply") {
-                return false;
-            }
-
-            // without this, join system message may for example be merged with first user message
-            if (previousMessage.type !== message.type) {
-                return false;
-            }
-
-            // if is system notification, don't merge
-            if (isSystemNotification(message.type)) {
-                return false;
-            }
-
-            // if nicknames are different, don't merge
-            if (previousMessage.author.nickname !== message.author.nickname) {
-                return false;
-            }
-
-            return true;
+        function hasMedia(message: Message | null): boolean {
+            return Boolean(
+                message &&
+                (
+                    (message.attachments?.length ?? 0) > 0 ||
+                    (message.embeds?.length ?? 0) > 0 ||
+                    (message.stickers?.length ?? 0) > 0
+                )
+            );
         }
 
         function messageContentIsLink(messageContent: string): boolean {
@@ -140,11 +110,14 @@
             get isSystemNotification(): boolean {
                 return isSystemNotification(message.type)
             },
-            get inviteIds(): string[] {
-                return inviteIds(message.content[0].content)
+            get invites(): InvitePreview[] {
+                return invitePreviews(message)
             },
             get shouldMerge(): boolean {
-                return shouldMerge(previousMessage, message)
+                return shouldMergeMessages(previousMessage, message, mergeMessages)
+            },
+            get followsMedia(): boolean {
+                return shouldMergeMessages(previousMessage, message, mergeMessages) && hasMedia(previousMessage)
             },
             get messageContentIsLink(): boolean {
                 return messageContentIsLink(message.content[0].content)
@@ -181,14 +154,22 @@
 
 <MesssageSpoilerHandler>
 
-    <div class="message" class:jumpable={showJump} class:notgrouped={!messageState.shouldMerge} data-id={message._id} class:ismobile={layoutState.mobile}>
+    <div
+        class="message"
+        class:jumpable={showJump}
+        class:notgrouped={!messageState.shouldMerge}
+        class:reply={message.type === "Reply"}
+        class:followsmedia={messageState.followsMedia}
+        data-id={message._id}
+        class:ismobile={layoutState.mobile}
+    >
         <button class="jump-btn" type="button" onclick={jumpToMessage}>Jump</button>
         {#if message.type == "24"}
             <MessageAutoModerationAction message={message} messageState={messageState} />
         {:else if messageState.isSystemNotification}
             <MessageSystemNotification message={message} />
         {:else}
-            <MessageOrdinary message={message} messageState={messageState} />
+            <MessageOrdinary {message} {messageState} {originalPosterId} />
         {/if}
         <!-- small debugging helper - show it using `localStorage.setItem("DEBUG", "1")` -->
         {#if isDebugModeEnabled}
@@ -199,12 +180,25 @@
 
 <style>
     .message {
-        margin-top: 5px;
-        padding: 0 20px;
+        margin-top: 0;
+        padding: 2px 20px;
         position: relative;
+
+        &:not(.notgrouped) {
+            padding-top: 3px;
+            padding-bottom: 3px;
+        }
 
         &.notgrouped {
             margin-top: 17px;
+        }
+
+        &.followsmedia {
+            margin-top: 5px;
+        }
+
+        &.notgrouped.reply {
+            margin-top: 6px;
         }
 
         .jump-btn {

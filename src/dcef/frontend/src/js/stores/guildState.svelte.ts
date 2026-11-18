@@ -2,29 +2,35 @@ import { getSearchState } from "../../lib/search/searchState.svelte";
 import { isObjectEqual } from "../helpers";
 import { fetchCategoriesChannelsThreads, fetchGuilds } from "./api";
 import { getLayoutState } from "./layoutState.svelte";
+import type { Category, Channel, Guild } from "../interfaces";
+import { normalizeViewerGuildId } from "../discordIds";
 
-let guilds = $state(await fetchGuilds());
-let guildId = $state("nonExistingGuildId");  // will be changed before the first load
+let guilds: Guild[] = $state(await fetchGuilds());
+let guildId: string | null = $state("nonExistingGuildId");  // will be changed before the first load
 let guild = $derived(guilds.find(g => g._id === guildId) || null);
 
 let channelId: string | null = $state(null);
-let categories = $state([]);
+let categories: Category[] = $state([]);
 let channel = $derived(categories.flatMap(c => c.channels).find(c => c._id === channelId) || null);
-let channelMessageId = $state(null);
+let channelMessageId: string | null = $state(null);
+let channelViewportMessageId: string | null = null;
+let channelMessageOffset: number | null = null;
 
 let threadId: string | null  = $state(null);
 let thread = $derived(categories.flatMap(c => c.channels).flatMap(c => c.threads).find(t => t._id === threadId) || null);
 let threadMessageId: string | null  = $state(null);
+let threadViewportMessageId: string | null = null;
+let threadMessageOffset: number | null = null;
 
 // fast lookups:
 // key is channelId, value is channel object
-let channelsLookup = $derived.by(() => categories.flatMap(c => c.channels).reduce((acc, channel) => {
+let channelsLookup = $derived.by(() => categories.flatMap(c => c.channels).reduce<Record<string, Channel>>((acc, channel) => {
 	acc[channel._id] = channel
 	return acc
 }, {}));
 
 // key is threadId, value is thread object
-let threadsLookup = $derived.by(() => categories.flatMap(c => c.channels).flatMap(c => c.threads).reduce((acc, thread) => {
+let threadsLookup = $derived.by(() => categories.flatMap(c => c.channels).flatMap(c => c.threads).reduce<Record<string, Channel>>((acc, thread) => {
 	acc[thread._id] = thread
 	return acc
 }, {}));
@@ -76,21 +82,50 @@ export function getGuildState() {
 			guild: guildId || null,
 			channel: channelId || null,
 			thread: threadId || null,
-			channelmessage: channelMessageId || null,
-			threadmessage: threadMessageId || null,
+			message: channelViewportMessageId || channelMessageId || null,
+			position: channelMessageOffset,
+			threadmessage: threadViewportMessageId || threadMessageId || null,
+			threadoffset: threadMessageOffset,
 			search: searchState.submittedSearchPrompt || null
 		}
 	}
 
 	function getUrlState() {
 		const urlParams = new URLSearchParams(window.location.search)
+		const parseOffset = (name: string) => {
+			const value = urlParams.get(name)
+			if (value === null) {
+				return null
+			}
+			const parsed = Number(value)
+			return Number.isFinite(parsed) ? parsed : null
+		}
 		let state = {
 			guild: urlParams.get("guild") || null,
 			channel: urlParams.get("channel") || null,
 			thread: urlParams.get("thread") || null,
-			channelmessage: urlParams.get("channelmessage") || null,
+			message: urlParams.get("message") || null,
+			position: parseOffset("position"),
 			threadmessage: urlParams.get("threadmessage") || null,
+			threadoffset: parseOffset("threadoffset"),
 			search: urlParams.get("search") || null
+		}
+
+		const pathParts = window.location.pathname.split("/").filter(Boolean)
+		if (pathParts[0] === "channels" && (pathParts.length === 3 || pathParts.length === 4)) {
+			state.guild = normalizeViewerGuildId(decodeURIComponent(pathParts[1]))
+			state.channel = normalizeViewerGuildId(decodeURIComponent(pathParts[2]))
+			state.message = pathParts.length === 4
+				? normalizeViewerGuildId(decodeURIComponent(pathParts[3]))
+				: "last"
+			state.thread = null
+			state.threadmessage = pathParts.length === 4
+				? urlParams.get("threadmessage")
+				: null
+			state.threadoffset = pathParts.length === 4
+				? parseOffset("threadoffset")
+				: null
+			state.search = null
 		}
 
 		// convert null strings to null values
@@ -121,6 +156,48 @@ export function getGuildState() {
 	}
 
 	/**
+	 * Use Discord-compatible paths for ordinary guild channel views. Keep the
+	 * query-string form for application states that do not have a Discord route.
+	 */
+	function stateToUrl(state) {
+		const formatDiscordId = (value: string) =>
+			/^\d+$/.test(value) ? (value.replace(/^0+/, "") || "0") : value
+		if (state.guild && state.channel && state.thread && !state.search) {
+			const routeParts = [
+				"channels",
+				encodeURIComponent(formatDiscordId(state.guild)),
+				encodeURIComponent(formatDiscordId(state.channel)),
+				encodeURIComponent(formatDiscordId(state.thread))
+			]
+			const routeParams = stateToParams({
+				threadmessage: state.threadmessage && state.threadmessage !== "first"
+					? state.threadmessage
+					: null,
+				threadoffset: state.threadoffset
+			})
+			return `/${routeParts.join("/")}${routeParams ? `?${routeParams}` : ""}`
+		}
+		if (state.guild && state.channel && !state.thread && !state.search) {
+			const routeParts = [
+				"channels",
+				encodeURIComponent(formatDiscordId(state.guild)),
+				encodeURIComponent(formatDiscordId(state.channel))
+			]
+			if (state.message && state.message !== "last") {
+				routeParts.push(encodeURIComponent(formatDiscordId(state.message)))
+			}
+
+			const routeParams = stateToParams({
+				position: state.message && state.message !== "last" ? state.position : null
+			})
+			return `/${routeParts.join("/")}${routeParams ? `?${routeParams}` : ""}`
+		}
+
+		const getParams = stateToParams(state)
+		return `/${getParams ? `?${getParams}` : ""}`
+	}
+
+	/**
 	 * Pushes the current state to the browser history if it has changed
 	 */
 	async function pushState() {
@@ -130,8 +207,7 @@ export function getGuildState() {
 			console.log("router - no changes detected")
 			return
 		}
-		const getParams = stateToParams(state)
-		window.history.pushState(state, `${state.guildId} ${state.channelId}`, `/?${getParams}`)
+		window.history.pushState(state, `${state.guild} ${state.channel}`, stateToUrl(state))
 		console.log("router - pushed", state);
 	}
 
@@ -141,8 +217,7 @@ export function getGuildState() {
 	 */
 	async function replaceState() {
 		const state: any = _getStateObject()
-		const getParams = stateToParams(state)
-		window.history.replaceState(state, "", `/?${getParams}`)
+		window.history.replaceState(state, "", stateToUrl(state))
 		console.log("router - replaced", state);
 	}
 
@@ -157,11 +232,40 @@ export function getGuildState() {
 		guildId = newGuildId;
 		searchState.clearSearch()
 		await changeChannelId(null, null)
-		categories = await fetchCategoriesChannelsThreads(guildId)
+		categories = withGuildSpecialChannels(
+			guild,
+			await fetchCategoriesChannelsThreads(guildId))
 		console.log("router - changed guildId", guildId);
 	}
 
-	async function changeChannelId(newChannelId: string | null, newChannelMessageId: string | null) {
+	async function refreshArchiveIndex() {
+		const requestedGuildId = guildId
+		const [nextGuilds, nextCategories] = await Promise.all([
+			fetchGuilds(),
+			fetchCategoriesChannelsThreads(requestedGuildId)
+		])
+
+		guilds = nextGuilds
+		if (guildId !== requestedGuildId) {
+			return
+		}
+		categories = withGuildSpecialChannels(
+			nextGuilds.find(candidate => candidate._id === requestedGuildId) ?? null,
+			nextCategories)
+
+		const nextChannels = categories.flatMap(category => category.channels)
+		const nextThreads = nextChannels.flatMap(channel => channel.threads)
+		if (channelId && !nextChannels.some(channel => channel._id === channelId)) {
+			await changeChannelId(null, null)
+		}
+		else if (threadId && !nextThreads.some(thread => thread._id === threadId)) {
+			await changeThreadId(null, null)
+		}
+	}
+
+	async function changeChannelId(newChannelId: string | null, newChannelMessageId: string | null, newChannelMessageOffset: number | null = null) {
+		channelViewportMessageId = newChannelId ? newChannelMessageId : null
+		channelMessageOffset = newChannelId ? newChannelMessageOffset : null
 		if (channelId === newChannelId && channelMessageId === newChannelMessageId) {
 			return;
 		}
@@ -183,7 +287,9 @@ export function getGuildState() {
 	}
 
 
-	async function changeThreadId(newThreadId: string | null, newThreadMessageId: string | null) {
+	async function changeThreadId(newThreadId: string | null, newThreadMessageId: string | null, newThreadMessageOffset: number | null = null) {
+		threadViewportMessageId = newThreadId ? newThreadMessageId : null
+		threadMessageOffset = newThreadId ? newThreadMessageOffset : null
 		if (threadId === newThreadId && threadMessageId === newThreadMessageId) {
 			return;
 		}
@@ -207,6 +313,30 @@ export function getGuildState() {
 		console.log("router - changed threadId", threadId);
 	}
 
+	async function replaceViewportState(target: "channel" | "thread", messageId: string, offset: number) {
+		if (target === "channel") {
+			if (!channelId) {
+				return
+			}
+			if (channelViewportMessageId === messageId && channelMessageOffset === offset) {
+				return
+			}
+			channelViewportMessageId = messageId
+			channelMessageOffset = offset
+		}
+		else {
+			if (!threadId) {
+				return
+			}
+			if (threadViewportMessageId === messageId && threadMessageOffset === offset) {
+				return
+			}
+			threadViewportMessageId = messageId
+			threadMessageOffset = offset
+		}
+		await replaceState()
+	}
+
 
 	/**
 	 * Switch to guildId and channelOrThreadId (will be automatically detected if it's a channel or thread id)
@@ -215,10 +345,12 @@ export function getGuildState() {
 	async function comboSetGuildChannel(guildId: string, channelOrThreadId: string) {
         await changeGuildId(guildId)
         if (isChannel(channelOrThreadId)) {
-          await changeChannelId(channelOrThreadId, null)
+          await changeChannelId(channelOrThreadId, "last")
         }
         else if (isThread(channelOrThreadId)) {
-          await changeThreadId(channelOrThreadId, null)
+          const thread = findThread(channelOrThreadId)
+          await changeChannelId(thread.categoryId, "last")
+          await changeThreadId(channelOrThreadId, "last")
         }
 		else {
 		  console.warn("router - comboSetGuildChannel - channel or thread not exported", channelOrThreadId)
@@ -234,6 +366,8 @@ export function getGuildState() {
         //   await changeChannelMessageId(messageId)
         }
         else if (isThread(channelOrThreadId)) {
+          const thread = findThread(channelOrThreadId)
+          await changeChannelId(thread.categoryId, "last")
           await changeThreadId(channelOrThreadId, messageId)
         //   await changeThreadMessageId(messageId)
         }
@@ -270,10 +404,17 @@ export function getGuildState() {
 		get channelMessageId() {
 			return channelMessageId;
 		},
+		get channelMessageOffset() {
+			return channelMessageOffset;
+		},
 		get threadMessageId() {
 			return threadMessageId;
 		},
+		get threadMessageOffset() {
+			return threadMessageOffset;
+		},
 		changeGuildId,
+		refreshArchiveIndex,
 		changeChannelId,
 		changeThreadId,
 		comboSetGuildChannel,
@@ -281,7 +422,71 @@ export function getGuildState() {
 		getUrlState,
 		pushState,
 		replaceState,
+		replaceViewportState,
 	};
+}
+
+function withGuildSpecialChannels(
+	targetGuild: Guild | null,
+	regularCategories: Category[]
+): Category[] {
+	if (!targetGuild) {
+		return regularCategories
+	}
+
+	const specialChannels: Channel[] = []
+	const serverGuide = targetGuild.serverGuide
+	if (serverGuide
+		&& (serverGuide.enabled
+			|| serverGuide.actions.length > 0
+			|| serverGuide.resourceChannels.length > 0)) {
+		specialChannels.push({
+			_id: "server-guide",
+			type: "GuildServerGuide",
+			typeLabel: "Server Guide",
+			categoryId: "get-started",
+			category: "Get Started",
+			name: "Server Guide",
+			position: -2,
+			categoryPosition: -1,
+			topic: null,
+			guildId: targetGuild._id,
+			msg_count: 0,
+			threads: []
+		})
+	}
+
+	const onboarding = targetGuild.onboarding
+	if (onboarding
+		&& (onboarding.enabled || onboarding.prompts.length > 0)) {
+		specialChannels.push({
+			_id: "channels-and-roles",
+			type: "GuildChannelsAndRoles",
+			typeLabel: "Channels & Roles",
+			categoryId: "get-started",
+			category: "Get Started",
+			name: "Channels & Roles",
+			position: -1,
+			categoryPosition: -1,
+			topic: null,
+			guildId: targetGuild._id,
+			msg_count: 0,
+			threads: []
+		})
+	}
+
+	if (specialChannels.length === 0) {
+		return regularCategories
+	}
+
+	return [{
+		_id: "get-started",
+		name: "Get Started",
+		channels: specialChannels,
+		msg_count: 0,
+		position: -1,
+		isHeaderless: true
+	}, ...regularCategories]
 }
 
 
@@ -303,8 +508,23 @@ export function channelOrThreadIdToName(channelId: string) {
 
 async function restoreGuildState(state) {
 	await guildState.changeGuildId(state.guild);
-	await guildState.changeChannelId(state.channel, state.channelmessage);
-	await guildState.changeThreadId(state.thread, state.threadmessage);
+	const discordPathThread = state.channel
+		&& state.message
+		&& isThread(state.message)
+		&& findThread(state.message)?.categoryId === state.channel
+		? state.message
+		: null;
+	if (discordPathThread) {
+		await guildState.changeChannelId(state.channel, "last");
+		await guildState.changeThreadId(
+			discordPathThread,
+			state.threadmessage ?? "first",
+			state.threadoffset);
+	}
+	else {
+		await guildState.changeChannelId(state.channel, state.message, state.position);
+		await guildState.changeThreadId(state.thread, state.threadmessage, state.threadoffset);
+	}
 
 	await searchState.setSearchPrompt(state.search)
 	await searchState.search(guildState.guildId)

@@ -1,0 +1,28 @@
+--- 02-before-linked-chat-edits.svelte
++++ 03-before-conflict-recovery-attempts.svelte
+@@ -169,7 +169,7 @@
+ 
+         if (typeof ResizeObserver !== "undefined") {
+             bottomResizeObserver = new ResizeObserver(() => {
+-                if (stickToBottom) {
++                if (stickToBottom && scrollContainer) {
+                     scrollContainer.scrollTop = scrollContainer.scrollHeight
+                     updatePresentState()
+                 }
+@@ -336,7 +336,7 @@
+             loadingDirection = null
+             await tick();  // wait for render
+ 
+-            if (stickToBottom) {
++            if (stickToBottom && scrollContainer) {
+                 enableBottomLock()
+             }
+             else if (scrollOffset !== null) {
+@@ -366,6 +366,7 @@
+     })
+ 
+     onDestroy(() => {
++        stickToBottom = false
+         bottomResizeObserver?.disconnect()
+         viewportRestoreObserver?.disconnect()
+         debouncedPersistViewport.cancel()

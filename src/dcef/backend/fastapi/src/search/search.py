@@ -2,6 +2,7 @@ import datetime
 import json
 import traceback
 import re
+from pathlib import Path
 from dateutil.relativedelta import relativedelta
 
 from ..common.cursor_pagination import cursor_pagination
@@ -10,7 +11,7 @@ from ..common.enrich_messages import enrich_messages_with_referenced
 from ..common.helpers import pad_id, print_json
 from ..common.Database import Database
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 
 from ..common.Database import Database
 
@@ -22,7 +23,7 @@ router = APIRouter(
 
 
 SEARCH_CATEGORIES = []
-with open("src/search/search_categories.json", "r", encoding="utf-8") as f:
+with Path(__file__).with_name("search_categories.json").open("r", encoding="utf-8") as f:
     SEARCH_CATEGORIES = json.load(f)
 
 
@@ -82,7 +83,7 @@ def parse_prompt(prompt: str):
 
 	searchCategoriesMap = {x["key"]: x for x in SEARCH_CATEGORIES}
 
-	stripped_prompt = prompt.strip() + " "
+	stripped_prompt = (prompt or "").strip() + " "
 
 	for i, char in enumerate(stripped_prompt):
 		# ignore escaped quote
@@ -94,8 +95,8 @@ def parse_prompt(prompt: str):
 			inside_quotes = not inside_quotes
 			continue
 
-		if char == ":" and not inside_quotes and word in valid_search_keys:
-			current_key = word
+		if char == ":" and not inside_quotes and word.lower() in valid_search_keys:
+			current_key = word.lower()
 			word = ""
 			continue
 
@@ -282,7 +283,7 @@ def extend_reactions(reaction_ids: list, reactions: list, guild_id: str):
 
 	or_ = []
 	for reaction in reactions:
-		or_.append({"name": {"$regex": f"^{reaction}$", "$options": "i"}})
+		or_.append({"name": {"$regex": f"^{re.escape(reaction)}$", "$options": "i"}})
 
 	query = {"$or": or_}
 
@@ -304,15 +305,23 @@ def extend_users(user_ids: list, usernames: list, guild_id: str):
 
 	user_ids = user_ids.copy()
 
-	or_ = []
 	for username in usernames:
-		or_.append({"names": username})
-
-	query = {"$or": or_}
-
-	new_user_ids_cursor = collection_authors.find(query, {"_id": 1})
-	new_user_ids = [user["_id"] for user in new_user_ids_cursor]
-	user_ids.extend(new_user_ids)
+		username = username.strip()
+		mention = re.fullmatch(r"<@!?([0-9]{1,24})>", username)
+		if mention or re.fullmatch(r"[0-9]{1,24}", username):
+			user_ids.append(pad_id(mention.group(1) if mention else username))
+			continue
+		username = username.removeprefix("@")
+		if not username:
+			continue
+		names = [username, username_discriminate_user(username)]
+		pattern = "^(?:" + "|".join(re.escape(name) for name in set(names)) + ")$"
+		matches = list(collection_authors.find({"names": {"$regex": pattern, "$options": "i"}}, {"_id": 1}).limit(2))
+		if not matches:
+			matches = list(collection_authors.find({"nicknames": {"$regex": "^" + re.escape(username) + "$", "$options": "i"}}, {"_id": 1}).limit(2))
+		if len(matches) > 1:
+			raise HTTPException(status_code=400, detail="User name matches multiple captured accounts; select a user suggestion or use their user ID.")
+		user_ids.extend(user["_id"] for user in matches)
 	user_ids = list(set(user_ids))  # remove duplicates
 	return user_ids
 
@@ -342,13 +351,10 @@ async def search_messages_(guild_id: str, prompt: str = None, prev_page_cursor: 
 		message_ids = search["message_ids"]
 		from_user_ids = search["from_user_ids"]
 		from_users = search["from_users"]
-		from_users = [username_discriminate_user(username) for username in from_users]
 		reaction_from_ids = search["reaction_from_ids"]
 		reaction_from = search["reaction_from"]
-		reaction_from = [username_discriminate_user(username) for username in reaction_from]
 		mentions_user_ids = search["mentions_user_ids"]
 		mentions_users = search["mentions_users"]
-		mentions_users = [username_discriminate_user(username) for username in mentions_users]
 		reaction_ids = search["reaction_ids"]
 		reactions = search["reactions"]
 		extensions = search["extensions"]
@@ -373,6 +379,11 @@ async def search_messages_(guild_id: str, prompt: str = None, prev_page_cursor: 
 
 		before = search["before"]
 		after = search["after"]
+		from_requested = bool(from_user_ids or from_users)
+		mentions_requested = bool(mentions_user_ids or mentions_users)
+		reaction_from_requested = bool(reaction_from_ids or reaction_from)
+		channels_requested = bool(in_channel_ids or in_channels)
+		categories_requested = bool(in_category_ids or in_categories)
 
 		# clean up
 		message_contains = [word.lower() for word in message_contains]
@@ -421,15 +432,15 @@ async def search_messages_(guild_id: str, prompt: str = None, prev_page_cursor: 
 		if len(message_ids) > 0:
 			query["_id"] = {"$in": message_ids}
 
-		if len(from_user_ids) > 0:
+		if from_requested:
 			query["author._id"] = {"$in": from_user_ids}
 		elif len(denylisted_user_ids) > 0:
 			query["author._id"] = {"$nin": denylisted_user_ids}
 
-		if len(reaction_from_ids) > 0:
+		if reaction_from_requested:
 			query["reactions.users._id"] = {"$in": reaction_from_ids}
 
-		if len(mentions_user_ids) > 0:
+		if mentions_requested:
 			query["mentions._id"] = {"$in": mentions_user_ids}
 
 		if len(reaction_ids) > 0:
@@ -453,17 +464,18 @@ async def search_messages_(guild_id: str, prompt: str = None, prev_page_cursor: 
 			# match partial filenames
 			or_ = []
 			for filename in filenames:
-				or_.append({"attachments.filenameWithoutHash": {"$regex": filename, "$options": "i"}})
-				or_.append({"embeds.thumbnail.filenameWithoutHash": {"$regex": filename, "$options": "i"}})
+				escaped_filename = re.escape(filename)
+				or_.append({"attachments.filenameWithoutHash": {"$regex": escaped_filename, "$options": "i"}})
+				or_.append({"embeds.thumbnail.filenameWithoutHash": {"$regex": escaped_filename, "$options": "i"}})
 
 			query["$and"].append({"$or": or_})
 
 
-		if len(in_channel_ids) > 0:
-			query["channelId"] = {"$in": in_channel_ids}
+		if channels_requested:
+			query["$and"].append({"channelId": {"$in": in_channel_ids}})
 
-		if len(in_category_ids) > 0:
-			query["channelId"] = {"$in": in_category_ids}
+		if categories_requested:
+			query["$and"].append({"channelId": {"$in": in_category_ids}})
 
 		if is_pinned is not None:
 			query["isPinned"] = is_pinned
@@ -551,23 +563,24 @@ async def search_messages_(guild_id: str, prompt: str = None, prev_page_cursor: 
 		if len(message_contains) > 0:
 			and_ = []
 			for message_should_contain in message_contains:
+				escaped_message = re.escape(message_should_contain)
 				and_.append({
 					"$or": [
 						{
 							"content.content": {
-								"$regex": message_should_contain,
+								"$regex": escaped_message,
 								"$options": "i"
 							}
 						},
 						{
 							"embeds.title": {
-								"$regex": message_should_contain,
+								"$regex": escaped_message,
 								"$options": "i"
 							},
 						},
 						{
 							"embeds.description": {
-								"$regex": message_should_contain,
+								"$regex": escaped_message,
 								"$options": "i"
 							},
 						},
@@ -589,8 +602,10 @@ async def search_messages_(guild_id: str, prompt: str = None, prev_page_cursor: 
 
 
 
+	except HTTPException:
+		raise
 	except Exception as e:
 		print("/search error:")
 		traceback.print_exc()
-		return ["error"]
+		raise HTTPException(status_code=400, detail="Invalid search query") from e
 
