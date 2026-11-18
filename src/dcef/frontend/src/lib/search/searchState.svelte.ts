@@ -1,4 +1,3 @@
-import { fetchSearch } from "../../js/stores/api";
 import { getGuildState } from "../../js/stores/guildState.svelte";
 
 const guildState = getGuildState();
@@ -7,6 +6,7 @@ let searchPrompt = $state("");
 let selectionStart = $state(0);
 let selectionEnd = $state(0);
 let submittedSearchPrompt = $state("");
+let submittedGuildId = $state<string | null>(null);
 let searchResultsIds = $state([]);
 let gotResults = $state(false);
 let searching = $state(false);
@@ -53,10 +53,11 @@ export function getSearchState() {
     saves results to searchResultsIds
     */
     async function search(guildId: string | null) {
-        if (submittedSearchPrompt === searchPrompt) {
+        if (submittedSearchPrompt === searchPrompt && submittedGuildId === guildId) {
             return;
         }
         submittedSearchPrompt = searchPrompt;
+        submittedGuildId = guildId;
         guildState.pushState();
         searching = true;
         gotResults = false;
@@ -64,8 +65,9 @@ export function getSearchState() {
         console.log("searchState - search", $state.snapshot(submittedSearchPrompt));
 
         try {
-            searchResultsIds = await fetchSearch(guildId, submittedSearchPrompt);
-            console.log(`searchState - search - searchResultsIds count ${searchResultsIds.length}`);
+            // InfiniteScroll3 owns the bounded first-page request and subsequent
+            // cursors. Do not launch a duplicate request from the input state.
+            searchResultsIds = [];
         }
         catch (e) {
             error = "Failed to fetch search results";

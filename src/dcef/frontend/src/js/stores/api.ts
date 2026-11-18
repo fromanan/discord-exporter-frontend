@@ -1,4 +1,5 @@
 import type { Author, Category, Channel, Guild, Role } from "../interfaces";
+import { requestBatches, searchParameters } from "../searchRequests";
 import {
     DIRECT_MESSAGE_GUILD_ID,
     LAST_MESSAGE_CURSOR,
@@ -72,13 +73,14 @@ export async function fetchOfflineMediaStatuses(mediaIds: number[]): Promise<Off
     }
 
     try {
-        const response = await fetch(
-            `${ARCHIVE_API_BASE_URL}/media/status?ids=${uniqueIds.join(",")}`,
-            { cache: "no-store" });
-        if (!response.ok) {
-            return [];
+        const statuses: OfflineMediaStatus[] = [];
+        for (const page of requestBatches(uniqueIds)) {
+            const response = await fetch(
+                `${ARCHIVE_API_BASE_URL}/media/status?ids=${page.join(",")}`,
+                { cache: "no-store" });
+            if (response.ok) statuses.push(...await response.json());
         }
-        return await response.json();
+        return statuses;
     }
     catch {
         return [];
@@ -164,7 +166,7 @@ export async function fetchMessages(guildId: string | null, channelId: string, d
     }
 }
 
-export async function fetchSearch(guildId: string | null, prompt: string, direction: "before" | "after" | "around" | "first" | "last", messageId: string | null = null, limit: number = 50) {
+export async function fetchSearch(guildId: string | null, prompt: string, direction: "before" | "after" | "around" | "first" | "last" = "first", messageId: string | null = null, limit: number = 50) {
     if (guildId === null) {
         guildId = "000000000000000000000000"
     }
@@ -175,22 +177,8 @@ export async function fetchSearch(guildId: string | null, prompt: string, direct
         messageId = "999999999999999999999999"
     }
     try {
-        let response
-        if (direction === "first") {
-            response = await fetch(`/api/guild/search?guild_id=${encodeURIComponent(guildId)}&prompt=${encodeURIComponent(prompt)}&next_page_cursor=0&limit=${encodeURIComponent(limit)}`)
-        }
-        else if (direction === "last") {
-            response = await fetch(`/api/guild/search?guild_id=${encodeURIComponent(guildId)}&prompt=${encodeURIComponent(prompt)}&prev_page_cursor=999999999999999999999999&limit=${encodeURIComponent(limit)}`)
-        }
-        else if (direction === "before") {
-            response = await fetch(`/api/guild/search?guild_id=${encodeURIComponent(guildId)}&prompt=${encodeURIComponent(prompt)}&prev_page_cursor=${encodeURIComponent(messageId)}&limit=${encodeURIComponent(limit)}`)
-        }
-        else if (direction === "after") {
-            response = await fetch(`/api/guild/search?guild_id=${encodeURIComponent(guildId)}&prompt=${encodeURIComponent(prompt)}&next_page_cursor=${encodeURIComponent(messageId)}&limit=${encodeURIComponent(limit)}`)
-        }
-        else {
-            response = await fetch(`/api/guild/search?guild_id=${encodeURIComponent(guildId)}&prompt=${encodeURIComponent(prompt)}&around_page_cursor=${encodeURIComponent(messageId)}&limit=${encodeURIComponent(limit)}`)
-        }
+        const parameters = searchParameters(guildId, prompt, direction, messageId, limit);
+        const response = await fetch(`/api/guild/search?${parameters}`);
 
         requireOk(response)
         let messageIds = await response.json()
